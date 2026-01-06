@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { DEFAULT_RATES, ROCK_CLASS_DESIGN_DATA, INITIAL_CHAINAGE_MAP, EXCAVATION_DATA } from '../constants';
 import { BatchEntry, ConcreteStep } from '../types';
@@ -181,7 +182,7 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
                 <p className="text-sm text-gray-600 mb-2">We subtract volumes taken up by other materials.</p>
                 <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
                     <li><strong>Shotcrete:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m</code> is deducted from the gross volume.</li>
-                    <li><strong>Stone Masonry:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.STONE_MASONRY_AREA} m² × Length</code> is deducted if date > {DEFAULT_RATES.MASONRY_CUTOFF_DATE}.</li>
+                    <li><strong>Stone Masonry:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.STONE_MASONRY_AREA} m² × Length</code> is deducted if date &gt; {DEFAULT_RATES.MASONRY_CUTOFF_DATE}.</li>
                 </ul>
             </div>
 
