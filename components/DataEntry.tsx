@@ -28,6 +28,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
   // Bulk State
   const [bulkText, setBulkText] = useState('');
   const [bulkStep, setBulkStep] = useState(ConcreteStep.GANTRY);
+  const [bulkDataType, setBulkDataType] = useState<'concrete' | 'masonry'>('concrete');
 
   // Import State
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -142,43 +143,80 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     const newEntries: Omit<BatchEntry, 'id' | 'designedQty'>[] = [];
 
     lines.forEach(line => {
-        // Expected format: From | To | Concrete | Masonry (Optional)
         const parts = line.split(/[\t,]+| {2,}/).map(s => s.trim()).filter(s => s);
-        if (parts.length >= 3) {
-            const f = parseChainage(parts[0]);
-            const t = parseChainage(parts[1]);
-            const act = parseFloat(parts[2]);
-            const masonry = parts.length >= 4 ? parseFloat(parts[3]) : 0;
-            
-            if (!isNaN(f) && !isNaN(t) && !isNaN(act)) {
-                const len = Math.abs(t - f);
-                const grossVol = calculateGrossConcreteVolume(f, t);
-                const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
-                const masonryDec = isNaN(masonry) ? 0 : masonry;
+        
+        // Handling for Concrete Data (Default)
+        // Format: From | To | Concrete | [Masonry]
+        if (bulkDataType === 'concrete') {
+            if (parts.length >= 3) {
+                const f = parseChainage(parts[0]);
+                const t = parseChainage(parts[1]);
+                const act = parseFloat(parts[2]);
+                const masonry = parts.length >= 4 ? parseFloat(parts[3]) : 0;
                 
-                const netSurvey = Math.max(0, grossVol - shotcreteDec - masonryDec);
-                
-                const priorInvert = len * DEFAULT_RATES.AVG_ACTUAL_INVERT;
-                const priorKicker = len * DEFAULT_RATES.AVG_ACTUAL_KICKER;
-                const totalPrior = priorInvert + priorKicker;
+                if (!isNaN(f) && !isNaN(t) && !isNaN(act)) {
+                    const len = Math.abs(t - f);
+                    const grossVol = calculateGrossConcreteVolume(f, t);
+                    const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
+                    const masonryDec = isNaN(masonry) ? 0 : masonry;
+                    
+                    const netSurvey = Math.max(0, grossVol - shotcreteDec - masonryDec);
+                    const priorInvert = len * DEFAULT_RATES.AVG_ACTUAL_INVERT;
+                    const priorKicker = len * DEFAULT_RATES.AVG_ACTUAL_KICKER;
+                    const totalPrior = priorInvert + priorKicker;
 
-                newEntries.push({
-                    date: new Date().toISOString().split('T')[0],
-                    fromChainage: f,
-                    toChainage: t,
-                    step: bulkStep,
-                    surveyQty: bulkStep === ConcreteStep.GANTRY ? netSurvey : 0,
-                    grossConcreteQty: grossVol,
-                    actualQty: act,
-                    cumulativeActualQty: bulkStep === ConcreteStep.GANTRY ? (act + totalPrior) : act,
-                    priorInvertQty: bulkStep === ConcreteStep.GANTRY ? priorInvert : 0,
-                    priorKickerQty: bulkStep === ConcreteStep.GANTRY ? priorKicker : 0,
-                    hasMasonryDeduction: masonryDec > 0,
-                    stoneMasonryQty: masonryDec,
-                    shotcreteDeduction: shotcreteDec,
-                    notes: 'Bulk Imported'
-                });
+                    newEntries.push({
+                        date: new Date().toISOString().split('T')[0],
+                        fromChainage: f,
+                        toChainage: t,
+                        step: bulkStep,
+                        surveyQty: bulkStep === ConcreteStep.GANTRY ? netSurvey : 0,
+                        grossConcreteQty: grossVol,
+                        actualQty: act,
+                        cumulativeActualQty: bulkStep === ConcreteStep.GANTRY ? (act + totalPrior) : act,
+                        priorInvertQty: bulkStep === ConcreteStep.GANTRY ? priorInvert : 0,
+                        priorKickerQty: bulkStep === ConcreteStep.GANTRY ? priorKicker : 0,
+                        hasMasonryDeduction: masonryDec > 0,
+                        stoneMasonryQty: masonryDec,
+                        shotcreteDeduction: shotcreteDec,
+                        notes: 'Bulk Imported'
+                    });
+                }
             }
+        } 
+        // Handling for Masonry Data Only
+        // Format: From | To | Masonry
+        else if (bulkDataType === 'masonry') {
+             if (parts.length >= 3) {
+                const f = parseChainage(parts[0]);
+                const t = parseChainage(parts[1]);
+                const masonry = parseFloat(parts[2]);
+                
+                if (!isNaN(f) && !isNaN(t) && !isNaN(masonry)) {
+                    const len = Math.abs(t - f);
+                    const grossVol = calculateGrossConcreteVolume(f, t);
+                    const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
+                    // Actual Concrete is 0, so Variance will be weird, but this records the deduction existance
+                    const netSurvey = Math.max(0, grossVol - shotcreteDec - masonry);
+                    
+                    newEntries.push({
+                        date: new Date().toISOString().split('T')[0],
+                        fromChainage: f,
+                        toChainage: t,
+                        step: bulkStep,
+                        surveyQty: bulkStep === ConcreteStep.GANTRY ? netSurvey : 0,
+                        grossConcreteQty: grossVol,
+                        actualQty: 0, // No concrete poured in this record
+                        cumulativeActualQty: 0,
+                        priorInvertQty: 0,
+                        priorKickerQty: 0,
+                        hasMasonryDeduction: true,
+                        stoneMasonryQty: masonry,
+                        shotcreteDeduction: shotcreteDec,
+                        notes: 'Masonry Data Only'
+                    });
+                }
+             }
         }
     });
 
@@ -373,10 +411,46 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
 
         {mode === 'bulk' && (
         <form onSubmit={handleBulkSubmit} className="p-6 space-y-6">
-            <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800 mb-4">
-                <strong>Format:</strong> From | To | Concrete Qty | Masonry Qty (Optional)<br/>
-                Copy directly from Excel.<br/>
-                System will auto-apply defaults for prior concrete if not specified.
+            
+            {/* Data Type Selector */}
+            <div className="flex space-x-4 mb-4">
+                <label className={`flex-1 border rounded-lg p-3 flex items-center justify-center cursor-pointer transition ${bulkDataType === 'concrete' ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-white border-gray-200 text-gray-600'}`}>
+                    <input 
+                        type="radio" 
+                        name="bulkType" 
+                        value="concrete" 
+                        checked={bulkDataType === 'concrete'}
+                        onChange={() => setBulkDataType('concrete')}
+                        className="mr-2"
+                    />
+                    <span className="font-bold text-sm">Concrete Records</span>
+                </label>
+                <label className={`flex-1 border rounded-lg p-3 flex items-center justify-center cursor-pointer transition ${bulkDataType === 'masonry' ? 'bg-orange-50 border-orange-500 text-orange-700' : 'bg-white border-gray-200 text-gray-600'}`}>
+                    <input 
+                        type="radio" 
+                        name="bulkType" 
+                        value="masonry" 
+                        checked={bulkDataType === 'masonry'}
+                        onChange={() => setBulkDataType('masonry')}
+                        className="mr-2"
+                    />
+                    <span className="font-bold text-sm">Masonry Records</span>
+                </label>
+            </div>
+
+            <div className={`${bulkDataType === 'concrete' ? 'bg-blue-50 text-blue-800' : 'bg-orange-50 text-orange-800'} p-4 rounded-lg text-sm mb-4 transition-colors`}>
+                {bulkDataType === 'concrete' ? (
+                    <>
+                        <strong>Format:</strong> From | To | Concrete Qty | Masonry Qty (Optional)<br/>
+                        <span className="text-xs opacity-75">e.g. 100 112 145 0</span>
+                    </>
+                ) : (
+                    <>
+                         <strong>Format:</strong> From | To | Masonry Qty<br/>
+                         <span className="text-xs opacity-75">e.g. 100 112 12.5</span><br/>
+                         Creates a record with 0 concrete poured, purely for deduction tracking.
+                    </>
+                )}
             </div>
             
             <div className="space-y-1">
@@ -394,12 +468,12 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
 
             <textarea 
                 className="w-full h-64 p-4 border rounded-lg font-mono text-sm bg-gray-50 focus:ring-2 focus:ring-blue-500"
-                placeholder={`0+922\t0+941\t164\t5.2\n0+941\t0+961\t98\t0\n...`}
+                placeholder={bulkDataType === 'concrete' ? `0+922\t0+941\t164\t5.2\n...` : `0+922\t0+941\t12.5\n...`}
                 value={bulkText}
                 onChange={e => setBulkText(e.target.value)}
             />
-             <button type="submit" className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-xl shadow-lg transition">
-                Import Bulk Data
+             <button type="submit" className={`w-full text-white font-bold py-3 px-4 rounded-xl shadow-lg transition ${bulkDataType === 'concrete' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-orange-600 hover:bg-orange-700'}`}>
+                {bulkDataType === 'concrete' ? 'Import Concrete Data' : 'Import Masonry Data'}
             </button>
         </form>
         )}
