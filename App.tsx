@@ -1,72 +1,130 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { BatchEntry, ConcreteStep, ForecastSummary } from './types';
-import { TOTAL_TUNNEL_LENGTH, INITIAL_CHAINAGE_MAP, ROCK_CLASS_DESIGN_DATA, DEFAULT_RATES } from './constants';
-import { calculateDesignQty, formatChainage, calculateUnionLength, calculateCoveredDesignVolume, mergeRanges } from './utils';
+import { TOTAL_TUNNEL_LENGTH, INITIAL_CHAINAGE_MAP, ROCK_CLASS_DESIGN_DATA } from './constants';
+import { calculateDesignQty, calculateUnionLength, mergeRanges } from './utils';
 import Dashboard from './components/Dashboard';
 import DataEntry from './components/DataEntry';
 import Analysis from './components/Analysis';
 import Parameters from './components/Parameters';
 import Calculations from './components/Calculations';
 
-const App: React.FC = () => {
-  // FIX: Load data immediately during initialization to prevent overwriting with empty array
-  const [entries, setEntries] = useState<BatchEntry[]>(() => {
-    try {
-      const saved = localStorage.getItem('hrt_concrete_data');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      console.error("Failed to load data", e);
-      return [];
-    }
-  });
+// Firebase Imports
+import { db, auth, googleProvider } from './firebase';
+import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+import { collection, onSnapshot, doc, setDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 
+const App: React.FC = () => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
+  const [entries, setEntries] = useState<BatchEntry[]>([]);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'entry' | 'analysis' | 'params' | 'calcs'>('dashboard');
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
 
-  // Save data to localStorage whenever entries change
+  // 1. Auth Listener
   useEffect(() => {
-    localStorage.setItem('hrt_concrete_data', JSON.stringify(entries));
-  }, [entries]);
+    if (!auth) {
+        setLoadingAuth(false);
+        return;
+    }
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setLoadingAuth(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
-  // Handle saving new or updated entries
-  const handleSave = (newEntriesData: Omit<BatchEntry, 'id' | 'designedQty'>[], isEdit: boolean = false) => {
-    const processed = newEntriesData.map(data => {
-      // For Gantry, we want to compare against the Total Profile (Invert + Kicker + Gantry) design
-      // because the Actual Qty (Cumulative) includes all three.
-      const designStep = data.step === ConcreteStep.GANTRY ? ConcreteStep.SUM : data.step;
+  // 2. Data Sync Listener (Firestore)
+  useEffect(() => {
+    if (!user || !db) return;
+
+    // Subscribe to the 'batches' collection
+    const q = query(collection(db, "batches"), orderBy("date", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const dbEntries = snapshot.docs.map(doc => ({ 
+          ...doc.data(), 
+          id: doc.id 
+      })) as BatchEntry[];
       
+      // Sort in JS as well to be safe or rely on query order
+      // We want to process them for display if needed, but data is raw here
+      setEntries(dbEntries);
+    }, (error) => {
+      console.error("Error fetching real-time data:", error);
+      alert("Error connecting to database. Do you have permission?");
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Handle Saving (Write to Firestore)
+  const handleSave = async (newEntriesData: Omit<BatchEntry, 'id' | 'designedQty'>[], isEdit: boolean = false) => {
+    if (!db || !user) return;
+
+    const processed = newEntriesData.map(data => {
+      const designStep = data.step === ConcreteStep.GANTRY ? ConcreteStep.SUM : data.step;
       return {
         ...data,
-        // If edit, use the existing editingEntryId. For bulk or new single, generate new.
         id: isEdit && editingEntryId ? editingEntryId : crypto.randomUUID(),
         designedQty: calculateDesignQty(data.fromChainage, data.toChainage, designStep)
       };
     });
 
-    if (isEdit && editingEntryId && processed.length === 1) {
-       // Update existing entry while preserving ID
-       setEntries(prev => prev.map(e => e.id === editingEntryId ? processed[0] : e));
-       setEditingEntryId(null);
-    } else {
-       // Append new entries
-       setEntries(prev => [...processed, ...prev]);
+    try {
+        for (const entry of processed) {
+            await setDoc(doc(db, "batches", entry.id), entry);
+        }
+        
+        if (isEdit) setEditingEntryId(null);
+        setActiveTab('dashboard');
+    } catch (e) {
+        console.error("Error saving batch:", e);
+        alert("Failed to save data. Check your internet connection.");
     }
-    
-    setActiveTab('dashboard');
   };
 
-  const handleImport = (importedData: BatchEntry[]) => {
-      if (confirm('Importing data will overwrite your current entries. Continue?')) {
-          setEntries(importedData);
-          setActiveTab('dashboard');
+  const handleImport = async (importedData: BatchEntry[]) => {
+      if (!db) return;
+      if (confirm('Importing data will add these entries to the cloud database. Continue?')) {
+          try {
+             for (const entry of importedData) {
+                 await setDoc(doc(db, "batches", entry.id), entry);
+             }
+             alert("Import successful!");
+             setActiveTab('dashboard');
+          } catch (e) {
+             console.error(e);
+             alert("Error during import.");
+          }
       }
   };
 
-  const deleteEntry = (id: string) => {
-    setEntries(entries.filter(e => e.id !== id));
+  const deleteEntry = async (id: string) => {
+    if (!db) return;
+    if (confirm("Are you sure you want to delete this entry?")) {
+        try {
+            await deleteDoc(doc(db, "batches", id));
+        } catch (e) {
+            console.error(e);
+            alert("Failed to delete.");
+        }
+    }
   };
 
+  const handleLogin = async () => {
+     if (!auth) return;
+     try {
+        await signInWithPopup(auth, googleProvider);
+     } catch (error) {
+        console.error("Login failed", error);
+     }
+  };
+
+  const handleLogout = () => {
+     if (auth) signOut(auth);
+  };
+
+  // --- Calculations (Same as before) ---
   const handleEdit = (entry: BatchEntry) => {
     setEditingEntryId(entry.id);
     setActiveTab('entry');
@@ -83,33 +141,21 @@ const App: React.FC = () => {
     editingEntryId ? entries.find(e => e.id === editingEntryId) : undefined
   , [editingEntryId, entries]);
 
-  // 1. Calculate Total Project Design Volume (Static Scope)
   const totalProjectDesignVolume = useMemo(() => {
     return INITIAL_CHAINAGE_MAP.reduce((acc, seg) => {
       const segLen = seg.to - seg.from;
-      // We are tracking Total Profile (Invert + Kicker + Gantry)
       return acc + (segLen * ROCK_CLASS_DESIGN_DATA[seg.rockClass].total);
     }, 0);
   }, []);
 
   const totals = useMemo(() => {
-    // Modified: Total Concrete Poured now specifically sums the Gantry Cumulative Volume.
-    // This represents Gantry + Invert + Kicker (Total Profile) as requested.
-    // We assume Gantry entries are the primary record for completed full-profile sections.
     const gantryEntries = entries.filter(e => e.step === ConcreteStep.GANTRY);
-    
-    // Summing cumulativeActualQty for Gantry entries gives us the Full Profile Poured.
-    // If no Gantry entries exist yet, we fall back to summing raw actuals of other steps.
     const totalActualPoured = gantryEntries.length > 0 
       ? gantryEntries.reduce((acc, curr) => acc + (curr.cumulativeActualQty || curr.actualQty), 0)
       : entries.reduce((acc, curr) => acc + curr.actualQty, 0);
     
-    // Design Volume "Covered" by logs.
     const totalDesignedSum = entries.reduce((acc, curr) => acc + curr.designedQty, 0);
-    
-    // Survey sum
     const totalSurvey = entries.reduce((acc, curr) => acc + curr.surveyQty, 0);
-    
     const totalActualForSurveyComparison = gantryEntries.reduce((acc, curr) => acc + (curr.cumulativeActualQty || 0), 0);
     const progress = calculateUnionLength(gantryEntries);
 
@@ -123,37 +169,25 @@ const App: React.FC = () => {
   }, [entries]);
 
   const forecast = useMemo((): ForecastSummary => {
-    // 1. Calculate Consumed Design Volume
-    // Since we are tracking "Total Profile" completion via Gantry entries,
-    // we must calculate the Design Volume for the Total Profile (SUM) for the length covered by Gantry.
     const gantryEntries = entries.filter(e => e.step === ConcreteStep.GANTRY);
-    
-    // Merge overlapping gantry ranges to get true linear coverage
     const intervals = gantryEntries.map(e => ({
       start: Math.min(e.fromChainage, e.toChainage),
       end: Math.max(e.fromChainage, e.toChainage)
     }));
     const mergedRanges = mergeRanges(intervals);
     
-    // Sum Design Qty (Total Profile) for these ranges
     let completedDesign = 0;
     mergedRanges.forEach(range => {
         completedDesign += calculateDesignQty(range.start, range.end, ConcreteStep.SUM);
     });
 
     const completedActual = totals.actual;
-
-    // 2. Remaining Design
     const remainingDesign = Math.max(0, totalProjectDesignVolume - completedDesign);
-
-    // 3. Current Performance Rate
     let currentOverbreakRate = 1.05;
     if (completedDesign > 0) {
         currentOverbreakRate = completedActual / completedDesign;
     }
     const safeRate = Math.max(0.8, Math.min(currentOverbreakRate, 2.0));
-
-    // 4. Forecasts
     const forecastToComplete = remainingDesign * safeRate;
     const projectedGrandTotal = completedActual + forecastToComplete;
     const remainingLength = Math.max(0, TOTAL_TUNNEL_LENGTH - totals.progress);
@@ -170,6 +204,56 @@ const App: React.FC = () => {
     };
   }, [totals, entries, totalProjectDesignVolume]);
 
+  // --- Rendering ---
+
+  // 1. Loading State
+  if (loadingAuth) {
+      return <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-500">Loading Application...</div>;
+  }
+
+  // 2. Setup Required State (Missing Config)
+  if (!auth) {
+      return (
+          <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 p-4">
+              <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full border border-red-200">
+                  <h2 className="text-2xl font-bold text-red-600 mb-4">Setup Required</h2>
+                  <p className="text-gray-600 mb-4">To enable shared data and logging in, you must connect this app to Firebase.</p>
+                  <div className="bg-gray-50 p-4 rounded text-xs font-mono mb-4 text-gray-700 overflow-x-auto">
+                      VITE_FIREBASE_API_KEY=...<br/>
+                      VITE_FIREBASE_AUTH_DOMAIN=...<br/>
+                      VITE_FIREBASE_PROJECT_ID=...<br/>
+                      ...
+                  </div>
+                  <p className="text-sm text-gray-500">Add these to your <code>.env</code> file or Netlify Environment Variables.</p>
+              </div>
+          </div>
+      );
+  }
+
+  // 3. Login State
+  if (!user) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-900 p-4">
+             <div className="bg-white p-10 rounded-2xl shadow-2xl max-w-sm w-full text-center">
+                 <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
+                 </div>
+                 <h1 className="text-2xl font-bold text-gray-800 mb-2">HRT Concrete Tracker</h1>
+                 <p className="text-gray-500 mb-8 text-sm">Sign in to access shared data logs.</p>
+                 
+                 <button 
+                    onClick={handleLogin}
+                    className="w-full flex items-center justify-center bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-semibold py-3 px-4 rounded-xl transition shadow-sm"
+                 >
+                    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5 mr-3" />
+                    Sign in with Google
+                 </button>
+             </div>
+        </div>
+      );
+  }
+
+  // 4. Main App State
   return (
     <div className="min-h-screen flex flex-col font-sans">
       <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-50">
@@ -180,40 +264,24 @@ const App: React.FC = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
             </div>
-            <h1 className="text-xl font-bold tracking-tight">HRT Concrete Tracker</h1>
+            <div>
+                <h1 className="text-xl font-bold tracking-tight">HRT Concrete Tracker</h1>
+                <p className="text-[10px] text-slate-400 font-mono hidden md:block">User: {user.email}</p>
+            </div>
           </div>
-          <nav className="hidden md:flex space-x-1 bg-slate-800 p-1 rounded-md">
-            <button 
-              onClick={() => handleTabChange('dashboard')}
-              className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'dashboard' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-            >
-              Dashboard
-            </button>
-            <button 
-              onClick={() => handleTabChange('entry')}
-              className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'entry' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-            >
-              Log Batch
-            </button>
-            <button 
-              onClick={() => handleTabChange('analysis')}
-              className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'analysis' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-            >
-              Analysis
-            </button>
-            <button 
-              onClick={() => handleTabChange('calcs')}
-              className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'calcs' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-            >
-              Logic
-            </button>
-            <button 
-              onClick={() => handleTabChange('params')}
-              className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'params' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}
-            >
-              Check Values
-            </button>
-          </nav>
+          
+          <div className="flex items-center space-x-4">
+              <nav className="hidden md:flex space-x-1 bg-slate-800 p-1 rounded-md">
+                <button onClick={() => handleTabChange('dashboard')} className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'dashboard' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>Dashboard</button>
+                <button onClick={() => handleTabChange('entry')} className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'entry' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>Log Batch</button>
+                <button onClick={() => handleTabChange('analysis')} className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'analysis' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>Analysis</button>
+                <button onClick={() => handleTabChange('calcs')} className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'calcs' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>Logic</button>
+                <button onClick={() => handleTabChange('params')} className={`px-4 py-1.5 rounded text-sm font-medium transition ${activeTab === 'params' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-700'}`}>Check Values</button>
+              </nav>
+              <button onClick={handleLogout} className="text-slate-400 hover:text-white text-sm" title="Sign Out">
+                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+              </button>
+          </div>
         </div>
       </header>
 
