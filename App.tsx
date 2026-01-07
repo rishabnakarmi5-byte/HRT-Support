@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { BatchEntry, ConcreteStep, ForecastSummary } from './types';
 import { TOTAL_TUNNEL_LENGTH, INITIAL_CHAINAGE_MAP, ROCK_CLASS_DESIGN_DATA } from './constants';
@@ -11,7 +10,7 @@ import Calculations from './components/Calculations';
 
 // Firebase Imports
 import { db, auth, googleProvider } from './firebase';
-import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
+import { signInWithPopup, signOut, onAuthStateChanged, User, AuthError } from 'firebase/auth';
 import { collection, onSnapshot, doc, setDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 
 const App: React.FC = () => {
@@ -116,7 +115,15 @@ const App: React.FC = () => {
      try {
         await signInWithPopup(auth, googleProvider);
      } catch (error) {
-        console.error("Login failed", error);
+        const authError = error as AuthError;
+        console.error("Login failed", authError);
+        if (authError.code === 'auth/unauthorized-domain') {
+            alert(`Configuration Error: Unauthorized Domain.\n\nThe domain "${window.location.hostname}" is not authorized for this Firebase project.\n\nPlease go to the Firebase Console > Authentication > Settings > Authorized Domains and add this domain.`);
+        } else if (authError.code === 'auth/popup-closed-by-user') {
+            // User closed popup, no need to alert
+        } else {
+            alert(`Login Failed: ${authError.message}`);
+        }
      }
   };
 
@@ -248,6 +255,7 @@ const App: React.FC = () => {
                     <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5 mr-3" />
                     Sign in with Google
                  </button>
+                 <p className="mt-4 text-[10px] text-gray-400">If login fails with "Unauthorized Domain", check your Firebase Console settings.</p>
              </div>
         </div>
       );

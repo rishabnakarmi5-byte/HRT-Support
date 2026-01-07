@@ -2,21 +2,21 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 
-// Safely access environment variables using optional chaining
-// This prevents crashes if import.meta.env is undefined at runtime
+// Configuration provided for the HRT Concrete Tracker app
 const firebaseConfig = {
-  apiKey: import.meta.env?.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env?.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env?.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env?.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env?.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env?.VITE_FIREBASE_APP_ID
+  apiKey: "AIzaSyCssNAPPJvQ7DYNjhtpduV-fEoJ0oEJMFQ",
+  authDomain: "hrtsupport-c6e46.firebaseapp.com",
+  projectId: "hrtsupport-c6e46",
+  storageBucket: "hrtsupport-c6e46.firebasestorage.app",
+  messagingSenderId: "1071492035864",
+  appId: "1:1071492035864:web:6b9a52271a803c3701da6d",
+  measurementId: "G-46725QD8QQ"
 };
 
-// Initialize only if config is present to prevent crashes during setup
-const isConfigured = !!firebaseConfig.apiKey;
+// Initialize Firebase directly with the provided config
+const app = initializeApp(firebaseConfig);
 
-const app = isConfigured ? initializeApp(firebaseConfig) : null;
-export const db = isConfigured && app ? getFirestore(app) : null;
-export const auth = isConfigured && app ? getAuth(app) : null;
+// Export initialized services
+export const db = getFirestore(app);
+export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
