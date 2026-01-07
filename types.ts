@@ -47,7 +47,8 @@ export interface BatchEntry {
   designedQty: number; // Theoretical Design (Total for Gantry, Partial for others)
   notes?: string;
   isDefault?: boolean;
-  hasMasonryDeduction: boolean;
+  hasMasonryDeduction: boolean; // Deprecated, kept for backward compatibility
+  stoneMasonryQty?: number; // Specific volume deduction for Stone Masonry
   shotcreteDeduction: number;
 }
 

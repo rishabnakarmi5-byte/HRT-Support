@@ -4,8 +4,8 @@ import { RockClass, ChainageMapEntry, RockClassData, ExcavationRecord } from './
 export const ROCK_CLASS_DESIGN_DATA: Record<RockClass, RockClassData> = {
   [RockClass.III]: { invert: 1.275, kicker: 0.54, gantry: 2.605, total: 4.42 },
   [RockClass.IV]: { invert: 1.275, kicker: 0.54, gantry: 2.605, total: 4.42 },
-  [RockClass.VA]: { invert: 1.59, kicker: 0.72, gantry: 3.701, total: 6.011 },
-  [RockClass.VB]: { invert: 1.59, kicker: 0.72, gantry: 3.701, total: 6.011 }
+  [RockClass.VA]: { invert: 1.56, kicker: 0.63, gantry: 3.1541, total: 5.3377 },
+  [RockClass.VB]: { invert: 1.59, kicker: 0.63, gantry: 3.1541, total: 6.3377 }
 };
 
 export const DEFAULT_RATES = {
@@ -21,7 +21,7 @@ export const DEFAULT_RATES = {
   SHOTCRETE_DEDUCTION: 0.4185, // m3 per linear meter
   STONE_MASONRY_AREA: 0.8, // m2 deduction after Dec 8
   MASONRY_CUTOFF_DATE: '2024-12-08',
-  FINISHED_INNER_AREA: 18.890 // m2 (Air void/Finished profile area to be subtracted)
+  FINISHED_INNER_AREA: 18.7995 // m2 (Air void/Finished profile area to be subtracted)
 };
 
 // Full Geological Chainage Map

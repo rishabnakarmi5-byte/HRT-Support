@@ -9,12 +9,11 @@ import Parameters from './components/Parameters';
 import Calculations from './components/Calculations';
 
 // Firebase Imports
+import firebase from 'firebase/compat/app';
 import { db, auth, googleProvider } from './firebase';
-import { signInWithPopup, signOut, onAuthStateChanged, User, AuthError } from 'firebase/auth';
-import { collection, onSnapshot, doc, setDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<firebase.User | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [entries, setEntries] = useState<BatchEntry[]>([]);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'entry' | 'analysis' | 'params' | 'calcs'>('dashboard');
@@ -26,7 +25,7 @@ const App: React.FC = () => {
         setLoadingAuth(false);
         return;
     }
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = auth.onAuthStateChanged((currentUser) => {
       setUser(currentUser);
       setLoadingAuth(false);
     });
@@ -38,8 +37,7 @@ const App: React.FC = () => {
     if (!user || !db) return;
 
     // Subscribe to the 'batches' collection
-    const q = query(collection(db, "batches"), orderBy("date", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = db.collection("batches").orderBy("date", "desc").onSnapshot((snapshot) => {
       const dbEntries = snapshot.docs.map(doc => ({ 
           ...doc.data(), 
           id: doc.id 
@@ -71,7 +69,7 @@ const App: React.FC = () => {
 
     try {
         for (const entry of processed) {
-            await setDoc(doc(db, "batches", entry.id), entry);
+            await db.collection("batches").doc(entry.id).set(entry);
         }
         
         if (isEdit) setEditingEntryId(null);
@@ -87,7 +85,7 @@ const App: React.FC = () => {
       if (confirm('Importing data will add these entries to the cloud database. Continue?')) {
           try {
              for (const entry of importedData) {
-                 await setDoc(doc(db, "batches", entry.id), entry);
+                 await db.collection("batches").doc(entry.id).set(entry);
              }
              alert("Import successful!");
              setActiveTab('dashboard');
@@ -102,7 +100,7 @@ const App: React.FC = () => {
     if (!db) return;
     if (confirm("Are you sure you want to delete this entry?")) {
         try {
-            await deleteDoc(doc(db, "batches", id));
+            await db.collection("batches").doc(id).delete();
         } catch (e) {
             console.error(e);
             alert("Failed to delete.");
@@ -113,9 +111,9 @@ const App: React.FC = () => {
   const handleLogin = async () => {
      if (!auth) return;
      try {
-        await signInWithPopup(auth, googleProvider);
+        await auth.signInWithPopup(googleProvider);
      } catch (error) {
-        const authError = error as AuthError;
+        const authError = error as firebase.auth.AuthError;
         console.error("Login failed", authError);
         if (authError.code === 'auth/unauthorized-domain') {
             alert(`Configuration Error: Unauthorized Domain.\n\nThe domain "${window.location.hostname}" is not authorized for this Firebase project.\n\nPlease go to the Firebase Console > Authentication > Settings > Authorized Domains and add this domain.`);
@@ -128,7 +126,7 @@ const App: React.FC = () => {
   };
 
   const handleLogout = () => {
-     if (auth) signOut(auth);
+     if (auth) auth.signOut();
   };
 
   // --- Calculations (Same as before) ---

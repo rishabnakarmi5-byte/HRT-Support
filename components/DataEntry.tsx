@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ConcreteStep, BatchEntry } from '../types';
 import { DEFAULT_RATES } from '../constants';
@@ -22,6 +21,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     actualQty: '', 
     priorInvert: '', 
     priorKicker: '',
+    stoneMasonry: '', // New field for variable masonry volume
     notes: '',
   });
 
@@ -37,22 +37,25 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     if (entryToEdit) {
       setMode('manual');
       
-      // Attempt to deduce prior values if not explicitly saved
-      // If we have specific prior values saved, use them.
-      // If not, but we have cumulative vs actual, try to infer or just set one and leave other empty?
-      // Better to calculate default split if missing.
       const cumulative = entryToEdit.cumulativeActualQty || entryToEdit.actualQty;
       const priorTotal = Math.max(0, cumulative - entryToEdit.actualQty);
       
       let pInvert = entryToEdit.priorInvertQty?.toString() || '';
       let pKicker = entryToEdit.priorKickerQty?.toString() || '';
 
-      // If we have a total prior but no specifics (backward compatibility), split roughly by ratio
       if (priorTotal > 0 && !pInvert && !pKicker) {
-         // Ratio 1.87 / 3.09 for invert, rest for kicker
          const ratio = DEFAULT_RATES.AVG_ACTUAL_INVERT / (DEFAULT_RATES.AVG_ACTUAL_INVERT + DEFAULT_RATES.AVG_ACTUAL_KICKER);
          pInvert = (priorTotal * ratio).toFixed(2);
          pKicker = (priorTotal * (1-ratio)).toFixed(2);
+      }
+
+      // Handle Masonry: use stored qty, or calculate from boolean if missing
+      const length = Math.abs(entryToEdit.toChainage - entryToEdit.fromChainage);
+      let masonryVal = '';
+      if (entryToEdit.stoneMasonryQty !== undefined) {
+          masonryVal = entryToEdit.stoneMasonryQty.toString();
+      } else if (entryToEdit.hasMasonryDeduction) {
+          masonryVal = (length * DEFAULT_RATES.STONE_MASONRY_AREA).toFixed(2);
       }
 
       setFormData({
@@ -62,19 +65,19 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
         actualQty: entryToEdit.actualQty.toString(),
         priorInvert: pInvert,
         priorKicker: pKicker,
+        stoneMasonry: masonryVal,
         notes: entryToEdit.notes || ''
       });
     }
   }, [entryToEdit]);
 
-  // Auto-calculate Prior Qty
+  // Auto-calculate Prior Qty (Defaults)
   const fromVal = parseFloat(formData.fromChainage);
   const toVal = parseFloat(formData.toChainage);
   const length = isNaN(fromVal) || isNaN(toVal) ? 0 : Math.abs(toVal - fromVal);
 
   useEffect(() => {
     if (mode === 'manual' && length > 0 && formData.step === ConcreteStep.GANTRY && !entryToEdit) {
-        // Only set if both are empty (clean entry)
         if (formData.priorInvert === '' && formData.priorKicker === '') {
             setFormData(prev => ({
                 ...prev,
@@ -85,23 +88,21 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     }
   }, [length, mode, formData.step, entryToEdit]);
 
-
-  const masonryApplied = useMemo(() => {
-    return new Date() >= new Date(DEFAULT_RATES.MASONRY_CUTOFF_DATE);
-  }, []);
-
+  // Calculations for display/save
   const calc = useMemo(() => {
     if (length <= 0) return { gross: 0, netSurvey: 0, design: 0 };
     
     const grossVol = calculateGrossConcreteVolume(fromVal, toVal);
     const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * length;
-    const masonryDec = masonryApplied ? DEFAULT_RATES.STONE_MASONRY_AREA * length : 0;
+    
+    // Use manual input if present, otherwise 0
+    const masonryDec = parseFloat(formData.stoneMasonry) || 0;
+    
     const netSurvey = Math.max(0, grossVol - shotcreteDec - masonryDec);
-
     const design = calculateDesignQty(fromVal, toVal, formData.step === ConcreteStep.GANTRY ? ConcreteStep.SUM : formData.step);
 
-    return { gross: grossVol, netSurvey, design };
-  }, [fromVal, toVal, length, masonryApplied, formData.step]);
+    return { gross: grossVol, netSurvey, design, shotcreteDec, masonryDec };
+  }, [fromVal, toVal, length, formData.stoneMasonry, formData.step]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -123,14 +124,15 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
       cumulativeActualQty: formData.step === ConcreteStep.GANTRY ? totalActual : currentActual,
       priorInvertQty: priorInvert,
       priorKickerQty: priorKicker,
-      hasMasonryDeduction: masonryApplied,
-      shotcreteDeduction: DEFAULT_RATES.SHOTCRETE_DEDUCTION * length,
+      hasMasonryDeduction: calc.masonryDec > 0, // Legacy flag logic
+      stoneMasonryQty: calc.masonryDec, // Specific value
+      shotcreteDeduction: calc.shotcreteDec,
       notes: formData.notes
     };
 
     onSave([entry], !!entryToEdit);
     if (!entryToEdit) {
-        setFormData({ fromChainage: '', toChainage: '', step: ConcreteStep.GANTRY, actualQty: '', priorInvert: '', priorKicker: '', notes: '' });
+        setFormData({ fromChainage: '', toChainage: '', step: ConcreteStep.GANTRY, actualQty: '', priorInvert: '', priorKicker: '', stoneMasonry: '', notes: '' });
     }
   };
 
@@ -140,17 +142,20 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     const newEntries: Omit<BatchEntry, 'id' | 'designedQty'>[] = [];
 
     lines.forEach(line => {
+        // Expected format: From | To | Concrete | Masonry (Optional)
         const parts = line.split(/[\t,]+| {2,}/).map(s => s.trim()).filter(s => s);
         if (parts.length >= 3) {
             const f = parseChainage(parts[0]);
             const t = parseChainage(parts[1]);
             const act = parseFloat(parts[2]);
+            const masonry = parts.length >= 4 ? parseFloat(parts[3]) : 0;
             
             if (!isNaN(f) && !isNaN(t) && !isNaN(act)) {
                 const len = Math.abs(t - f);
                 const grossVol = calculateGrossConcreteVolume(f, t);
                 const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
-                const masonryDec = masonryApplied ? DEFAULT_RATES.STONE_MASONRY_AREA * len : 0;
+                const masonryDec = isNaN(masonry) ? 0 : masonry;
+                
                 const netSurvey = Math.max(0, grossVol - shotcreteDec - masonryDec);
                 
                 const priorInvert = len * DEFAULT_RATES.AVG_ACTUAL_INVERT;
@@ -168,7 +173,8 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                     cumulativeActualQty: bulkStep === ConcreteStep.GANTRY ? (act + totalPrior) : act,
                     priorInvertQty: bulkStep === ConcreteStep.GANTRY ? priorInvert : 0,
                     priorKickerQty: bulkStep === ConcreteStep.GANTRY ? priorKicker : 0,
-                    hasMasonryDeduction: masonryApplied,
+                    hasMasonryDeduction: masonryDec > 0,
+                    stoneMasonryQty: masonryDec,
                     shotcreteDeduction: shotcreteDec,
                     notes: 'Bulk Imported'
                 });
@@ -300,6 +306,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
               </div>
 
               {formData.step === ConcreteStep.GANTRY && (
+                <>
                 <div className="grid grid-cols-2 gap-4 pt-2 border-t border-blue-200">
                     <div className="col-span-2 text-[10px] text-blue-600 font-bold uppercase tracking-wider">
                         Prior Concrete (Invert + Kicker)
@@ -333,6 +340,27 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                         />
                     </div>
                 </div>
+
+                <div className="pt-2 border-t border-blue-200 space-y-1">
+                    <div className="flex justify-between items-center">
+                         <label className="text-xs font-semibold text-blue-900 uppercase">Stone Masonry Deduction (m³)</label>
+                         <button 
+                            type="button" 
+                            onClick={() => setFormData({...formData, stoneMasonry: (length * DEFAULT_RATES.STONE_MASONRY_AREA).toFixed(2)})}
+                            className="text-[9px] text-blue-500 underline hover:text-blue-700"
+                        >
+                            Auto Calc ({DEFAULT_RATES.STONE_MASONRY_AREA}m²/m)
+                         </button>
+                    </div>
+                    <input 
+                        type="number" step="0.01"
+                        placeholder="0.00"
+                        value={formData.stoneMasonry}
+                        onChange={e => setFormData({...formData, stoneMasonry: e.target.value})}
+                        className="w-full border-blue-200 rounded-lg p-2.5 bg-white focus:ring-2 focus:ring-blue-500 font-mono"
+                    />
+                </div>
+                </>
               )}
             </div>
           </div>
@@ -346,9 +374,9 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
         {mode === 'bulk' && (
         <form onSubmit={handleBulkSubmit} className="p-6 space-y-6">
             <div className="bg-yellow-50 p-4 rounded-lg text-sm text-yellow-800 mb-4">
-                <strong>Format:</strong> From | To | Dispatched Qty <br/>
-                Copy directly from Excel. Columns must be in that order.<br/>
-                System will auto-apply <strong>{DEFAULT_RATES.AVG_ACTUAL_INVERT} (Inv) + {DEFAULT_RATES.AVG_ACTUAL_KICKER} (Kkr)</strong> prior concrete for Total Profile.
+                <strong>Format:</strong> From | To | Concrete Qty | Masonry Qty (Optional)<br/>
+                Copy directly from Excel.<br/>
+                System will auto-apply defaults for prior concrete if not specified.
             </div>
             
             <div className="space-y-1">
@@ -366,7 +394,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
 
             <textarea 
                 className="w-full h-64 p-4 border rounded-lg font-mono text-sm bg-gray-50 focus:ring-2 focus:ring-blue-500"
-                placeholder={`0+922\t0+941\t164\n0+941\t0+961\t98\n...`}
+                placeholder={`0+922\t0+941\t164\t5.2\n0+941\t0+961\t98\t0\n...`}
                 value={bulkText}
                 onChange={e => setBulkText(e.target.value)}
             />

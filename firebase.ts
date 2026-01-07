@@ -1,6 +1,6 @@
-import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
-import { getAuth, GoogleAuthProvider } from "firebase/auth";
+import firebase from "firebase/compat/app";
+import "firebase/compat/auth";
+import "firebase/compat/firestore";
 
 // Configuration provided for the HRT Concrete Tracker app
 const firebaseConfig = {
@@ -13,10 +13,14 @@ const firebaseConfig = {
   measurementId: "G-46725QD8QQ"
 };
 
-// Initialize Firebase directly with the provided config
-const app = initializeApp(firebaseConfig);
+// Initialize Firebase directly with the provided config if not already initialized
+if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
+}
 
 // Export initialized services
-export const db = getFirestore(app);
-export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
+export const db = firebase.firestore();
+export const auth = firebase.auth();
+export const googleProvider = new firebase.auth.GoogleAuthProvider();
+
+export default firebase;

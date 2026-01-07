@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { DEFAULT_RATES, ROCK_CLASS_DESIGN_DATA, INITIAL_CHAINAGE_MAP, EXCAVATION_DATA } from '../constants';
 import { BatchEntry, ConcreteStep } from '../types';
@@ -85,9 +84,6 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
       }
 
       // 1. Gross Volume
-      // Simply: (AreaStart + AreaEnd) / 2 * Length. (The utils does multi-point integration, here we simplify visualization or mimic utils logic if complex)
-      // The Utils does full trapezoidal over all points inside.
-      // Let's trace all points.
       const points = EXCAVATION_DATA.filter(p => p.chainage > start && p.chainage < end);
       const allPoints = [
           { chainage: start, area: getArea(start) },
@@ -115,11 +111,15 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
       const shotcrete = DEFAULT_RATES.SHOTCRETE_DEDUCTION * length;
       logs.push(`> Deduction: Shotcrete (${length.toFixed(2)}m × ${DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m) = -${shotcrete.toFixed(3)} m³`);
       
-      const masonry = entry.hasMasonryDeduction ? (DEFAULT_RATES.STONE_MASONRY_AREA * length) : 0;
-      if (entry.hasMasonryDeduction) {
-        logs.push(`> Deduction: Stone Masonry (${length.toFixed(2)}m × ${DEFAULT_RATES.STONE_MASONRY_AREA} m²) = -${masonry.toFixed(3)} m³`);
+      let masonry = 0;
+      if (entry.stoneMasonryQty !== undefined) {
+         masonry = entry.stoneMasonryQty;
+         logs.push(`> Deduction: Stone Masonry (Specific Logged Value) = -${masonry.toFixed(3)} m³`);
+      } else if (entry.hasMasonryDeduction) {
+         masonry = DEFAULT_RATES.STONE_MASONRY_AREA * length;
+         logs.push(`> Deduction: Stone Masonry (Legacy Rate) (${length.toFixed(2)}m × ${DEFAULT_RATES.STONE_MASONRY_AREA} m²) = -${masonry.toFixed(3)} m³`);
       } else {
-        logs.push(`> Deduction: Stone Masonry = 0 (Date before cutoff)`);
+         logs.push(`> Deduction: Stone Masonry = 0`);
       }
 
       const net = Math.max(0, totalGross - shotcrete - masonry);
@@ -182,7 +182,7 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
                 <p className="text-sm text-gray-600 mb-2">We subtract volumes taken up by other materials.</p>
                 <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
                     <li><strong>Shotcrete:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m</code> is deducted from the gross volume.</li>
-                    <li><strong>Stone Masonry:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.STONE_MASONRY_AREA} m² × Length</code> is deducted if date &gt; {DEFAULT_RATES.MASONRY_CUTOFF_DATE}.</li>
+                    <li><strong>Stone Masonry:</strong> Specific volume provided per batch. (Legacy records deduct {DEFAULT_RATES.STONE_MASONRY_AREA} m²/m).</li>
                 </ul>
             </div>
 
