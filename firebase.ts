@@ -4,7 +4,7 @@ import "firebase/compat/firestore";
 
 // Configuration provided for the HRT Concrete Tracker app
 const firebaseConfig = {
-  apiKey: "AIzaSyCssNAPPJvQ7DYNjhtpduV-fEoJ0oEJMFQ",
+  apiKey: "#",
   authDomain: "hrtsupport-c6e46.firebaseapp.com",
   projectId: "hrtsupport-c6e46",
   storageBucket: "hrtsupport-c6e46.firebasestorage.app",
