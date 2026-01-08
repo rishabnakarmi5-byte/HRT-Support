@@ -2,8 +2,9 @@
 import React, { useMemo } from 'react';
 import { BatchEntry, ConcreteStep, ForecastSummary } from '../types';
 import { calculateDesignQty, formatChainage } from '../utils';
+import { DEFAULT_RATES } from '../constants';
 import { 
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Brush, Line, ComposedChart, Area, LineChart
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Brush, Line, ComposedChart, Area, LineChart, BarChart, Bar
 } from 'recharts';
 
 interface AnalysisProps {
@@ -44,9 +45,6 @@ const Analysis: React.FC<AnalysisProps> = ({ entries, totalLength, forecast }) =
         overConsumption: parseFloat(overConsumption.toFixed(1))
       };
     });
-
-    // Removed anchors at 0 and totalLength to prevent lines from ramping up/down to zero
-    // This ensures lines only appear where data actually exists.
 
     return data.sort((a, b) => a.chainage - b.chainage);
   }, [gantryEntries, totalLength]);
@@ -100,8 +98,40 @@ const Analysis: React.FC<AnalysisProps> = ({ entries, totalLength, forecast }) =
     return points;
   }, [gantryEntries, totalLength, forecast]);
 
-  if (gantryEntries.length === 0) {
-      return <div className="p-10 text-center text-gray-500">No Gantry data available. Add entries to view projection.</div>;
+  // 3. Masonry Savings Data
+  const masonryAnalysis = useMemo(() => {
+    let totalVolume = 0;
+    const distribution: any[] = [];
+    
+    // Sort all entries spatially to plot along chainage
+    const sorted = [...entries].sort((a, b) => Math.min(a.fromChainage, a.toChainage) - Math.min(b.fromChainage, b.toChainage));
+
+    sorted.forEach(e => {
+        let vol = 0;
+        // Use specific quantity if available, else calc from legacy boolean
+        if (e.stoneMasonryQty !== undefined) {
+            vol = e.stoneMasonryQty;
+        } else if (e.hasMasonryDeduction) {
+            const len = Math.abs(e.toChainage - e.fromChainage);
+            vol = len * DEFAULT_RATES.STONE_MASONRY_AREA;
+        }
+
+        if (vol > 0) {
+            totalVolume += vol;
+            distribution.push({
+                chainage: (e.fromChainage + e.toChainage) / 2,
+                vol: parseFloat(vol.toFixed(2)),
+                label: `${formatChainage(e.fromChainage)}-${formatChainage(e.toChainage)}`,
+                date: e.date
+            });
+        }
+    });
+
+    return { totalVolume, distribution };
+  }, [entries]);
+
+  if (gantryEntries.length === 0 && masonryAnalysis.distribution.length === 0) {
+      return <div className="p-10 text-center text-gray-500">No data available. Add entries to view analysis.</div>;
   }
 
   return (
@@ -189,52 +219,92 @@ const Analysis: React.FC<AnalysisProps> = ({ entries, totalLength, forecast }) =
         </div>
       </div>
 
-      {/* 2. Over-consumption Percentage Distribution (New) */}
-      <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-        <h3 className="text-lg font-bold mb-2 text-gray-800">Over-consumption Percentage Distribution</h3>
-        <p className="text-xs text-gray-500 mb-6">
-            Percentage over theoretical design.
-        </p>
-        <div className="h-64 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart 
-              data={spatialData} 
-              margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
-            >
-              <CartesianGrid strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="chainage" type="number" unit="m" domain={[0, totalLength]} tickCount={12} />
-              <YAxis unit="%" />
-              <Tooltip 
-                 cursor={{fill: 'rgba(0,0,0,0.05)'}}
-                 content={({ active, payload }) => {
-                    if (active && payload && payload.length) {
-                        const d = payload[0].payload;
-                        if (d.len === 0) return null;
-                        return (
-                            <div className="bg-white p-2 border shadow-lg text-xs rounded">
-                                <p className="font-bold">Ch: {d.chainageDisplay}</p>
-                                <p className="text-red-600">Over-consumption: {d.overConsumption}%</p>
-                            </div>
-                        );
-                    }
-                    return null;
-                 }}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="overConsumption" 
-                name="Over-consumption %" 
-                stroke="#ef4444" 
-                strokeWidth={2} 
-                dot={{r: 3, fill: '#ef4444'}} 
-                activeDot={{r: 5}} 
-              />
-            </LineChart>
-          </ResponsiveContainer>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* 2. Over-consumption Percentage Distribution */}
+        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+            <h3 className="text-lg font-bold mb-2 text-gray-800">Over-consumption %</h3>
+            <p className="text-xs text-gray-500 mb-6">Percentage over theoretical design by Chainage.</p>
+            <div className="h-64 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+                <LineChart 
+                data={spatialData} 
+                margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                >
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="chainage" type="number" unit="m" domain={[0, totalLength]} tickCount={6} />
+                <YAxis unit="%" width={40} />
+                <Tooltip 
+                    cursor={{fill: 'rgba(0,0,0,0.05)'}}
+                    content={({ active, payload }) => {
+                        if (active && payload && payload.length) {
+                            const d = payload[0].payload;
+                            if (d.len === 0) return null;
+                            return (
+                                <div className="bg-white p-2 border shadow-lg text-xs rounded">
+                                    <p className="font-bold">Ch: {d.chainageDisplay}</p>
+                                    <p className="text-red-600">Over-consumption: {d.overConsumption}%</p>
+                                </div>
+                            );
+                        }
+                        return null;
+                    }}
+                />
+                <Line 
+                    type="monotone" 
+                    dataKey="overConsumption" 
+                    stroke="#ef4444" 
+                    strokeWidth={2} 
+                    dot={{r: 2, fill: '#ef4444'}} 
+                    activeDot={{r: 4}} 
+                />
+                </LineChart>
+            </ResponsiveContainer>
+            </div>
+        </div>
+
+        {/* 3. Stone Masonry Savings Analysis */}
+        <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm flex flex-col">
+             <div className="flex justify-between items-start mb-6">
+                <div>
+                    <h3 className="text-lg font-bold text-gray-800">Stone Masonry Savings</h3>
+                    <p className="text-xs text-gray-500">Concrete volume saved by masonry deductions.</p>
+                </div>
+                <div className="text-right">
+                    <p className="text-2xl font-bold text-emerald-600">{masonryAnalysis.totalVolume.toFixed(2)} <span className="text-sm text-emerald-400">m³</span></p>
+                    <p className="text-[10px] uppercase font-bold text-gray-400">Total Saved</p>
+                </div>
+             </div>
+
+             <div className="flex-grow min-h-[200px]">
+                <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={masonryAnalysis.distribution} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="chainage" type="number" unit="m" domain={[0, totalLength]} tickCount={6} />
+                        <YAxis unit="m³" width={40} />
+                        <Tooltip 
+                            cursor={{fill: 'rgba(16, 185, 129, 0.1)'}}
+                            content={({ active, payload }) => {
+                                if (active && payload && payload.length) {
+                                    const d = payload[0].payload;
+                                    return (
+                                        <div className="bg-white p-2 border shadow-lg text-xs rounded border-emerald-200">
+                                            <p className="font-bold text-gray-700">{d.label}</p>
+                                            <p className="text-emerald-600 font-bold">Saved: {d.vol} m³</p>
+                                            <p className="text-[10px] text-gray-400">{d.date}</p>
+                                        </div>
+                                    );
+                                }
+                                return null;
+                            }}
+                        />
+                        <Bar dataKey="vol" fill="#10b981" name="Saved Volume" />
+                    </BarChart>
+                </ResponsiveContainer>
+             </div>
         </div>
       </div>
 
-      {/* 3. Consumption Profile */}
+      {/* 4. Detailed Consumption Profile */}
       <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
         <h3 className="text-lg font-bold mb-2 text-gray-800">Consumption Profile (m³/m)</h3>
         <p className="text-xs text-gray-500 mb-6">
