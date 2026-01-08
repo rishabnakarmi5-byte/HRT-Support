@@ -1,16 +1,17 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { ConcreteStep, BatchEntry } from '../types';
+import { ConcreteStep, BatchEntry, SurveyPoint } from '../types';
 import { DEFAULT_RATES } from '../constants';
-import { calculateGrossConcreteVolume, calculateDesignQty, parseChainage } from '../utils';
+import { calculateExpectedConcreteVolume, calculateDesignQty, parseChainage, calculatePriorConcreteVolume } from '../utils';
 
 interface DataEntryProps {
   onSave: (entries: Omit<BatchEntry, 'id' | 'designedQty'>[], isEdit?: boolean) => void;
-  entries?: BatchEntry[]; // For export
+  entries?: BatchEntry[]; // For export and Prior Calc
+  surveyOverrides?: SurveyPoint[]; // For updated excavation profiles
   onImport?: (data: BatchEntry[]) => void;
   entryToEdit?: BatchEntry;
 }
 
-const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryToEdit }) => {
+const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries = [], surveyOverrides = [], onImport, entryToEdit }) => {
   const [mode, setMode] = useState<'manual' | 'bulk' | 'manage'>('manual');
   
   // Manual State
@@ -72,7 +73,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     }
   }, [entryToEdit]);
 
-  // Auto-calculate Prior Qty (Defaults)
+  // Auto-calculate Prior Qty (Interpolated or Default)
   const fromVal = parseFloat(formData.fromChainage);
   const toVal = parseFloat(formData.toChainage);
   const length = isNaN(fromVal) || isNaN(toVal) ? 0 : Math.abs(toVal - fromVal);
@@ -80,21 +81,31 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
   useEffect(() => {
     if (mode === 'manual' && length > 0 && formData.step === ConcreteStep.GANTRY && !entryToEdit) {
         if (formData.priorInvert === '' && formData.priorKicker === '') {
+            // New Logic: Try to find actuals in database
+            const foundInvert = calculatePriorConcreteVolume(fromVal, toVal, ConcreteStep.INVERT, entries);
+            const foundKicker = calculatePriorConcreteVolume(fromVal, toVal, ConcreteStep.KICKER, entries);
+
+            // If found, use them. If not (0), fallback to defaults.
+            const invertVal = foundInvert > 0 ? foundInvert : (length * DEFAULT_RATES.AVG_ACTUAL_INVERT);
+            const kickerVal = foundKicker > 0 ? foundKicker : (length * DEFAULT_RATES.AVG_ACTUAL_KICKER);
+
             setFormData(prev => ({
                 ...prev,
-                priorInvert: (length * DEFAULT_RATES.AVG_ACTUAL_INVERT).toFixed(2),
-                priorKicker: (length * DEFAULT_RATES.AVG_ACTUAL_KICKER).toFixed(2)
+                priorInvert: invertVal.toFixed(2),
+                priorKicker: kickerVal.toFixed(2)
             }));
         }
     }
-  }, [length, mode, formData.step, entryToEdit]);
+  }, [length, mode, formData.step, entryToEdit, entries, fromVal, toVal]);
 
   // Calculations for display/save
   const calc = useMemo(() => {
-    if (length <= 0) return { gross: 0, netSurvey: 0, design: 0 };
+    if (length <= 0) return { gross: 0, netSurvey: 0, design: 0, shotcreteDec: 0, masonryDec: 0 };
     
-    const grossVol = calculateGrossConcreteVolume(fromVal, toVal);
-    const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * length;
+    // New Calculation that handles Survey Overrides (updated profile + no shotcrete deduction)
+    const expected = calculateExpectedConcreteVolume(fromVal, toVal, surveyOverrides);
+    const grossVol = expected.gross;
+    const shotcreteDec = expected.shotcrete;
     
     // Use manual input if present, otherwise 0
     const masonryDec = parseFloat(formData.stoneMasonry) || 0;
@@ -103,7 +114,7 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
     const design = calculateDesignQty(fromVal, toVal, formData.step === ConcreteStep.GANTRY ? ConcreteStep.SUM : formData.step);
 
     return { gross: grossVol, netSurvey, design, shotcreteDec, masonryDec };
-  }, [fromVal, toVal, length, formData.stoneMasonry, formData.step]);
+  }, [fromVal, toVal, length, formData.stoneMasonry, formData.step, surveyOverrides]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,13 +167,25 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                 
                 if (!isNaN(f) && !isNaN(t) && !isNaN(act)) {
                     const len = Math.abs(t - f);
-                    const grossVol = calculateGrossConcreteVolume(f, t);
-                    const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
+                    // Updated Calculation Logic using Survey Overrides
+                    const expected = calculateExpectedConcreteVolume(f, t, surveyOverrides);
+                    const grossVol = expected.gross;
+                    const shotcreteDec = expected.shotcrete;
+                    
                     const masonryDec = isNaN(masonry) ? 0 : masonry;
                     
                     const netSurvey = Math.max(0, grossVol - shotcreteDec - masonryDec);
-                    const priorInvert = len * DEFAULT_RATES.AVG_ACTUAL_INVERT;
-                    const priorKicker = len * DEFAULT_RATES.AVG_ACTUAL_KICKER;
+                    
+                    // Prior Calculation: Try DB First, then Fallback
+                    let priorInvert = 0;
+                    let priorKicker = 0;
+                    if (bulkStep === ConcreteStep.GANTRY) {
+                        const foundInvert = calculatePriorConcreteVolume(f, t, ConcreteStep.INVERT, entries);
+                        const foundKicker = calculatePriorConcreteVolume(f, t, ConcreteStep.KICKER, entries);
+                        
+                        priorInvert = foundInvert > 0 ? foundInvert : (len * DEFAULT_RATES.AVG_ACTUAL_INVERT);
+                        priorKicker = foundKicker > 0 ? foundKicker : (len * DEFAULT_RATES.AVG_ACTUAL_KICKER);
+                    }
                     const totalPrior = priorInvert + priorKicker;
 
                     newEntries.push({
@@ -193,10 +216,9 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                 const masonry = parseFloat(parts[2]);
                 
                 if (!isNaN(f) && !isNaN(t) && !isNaN(masonry)) {
-                    const len = Math.abs(t - f);
-                    const grossVol = calculateGrossConcreteVolume(f, t);
-                    const shotcreteDec = DEFAULT_RATES.SHOTCRETE_DEDUCTION * len;
-                    // Actual Concrete is 0, so Variance will be weird, but this records the deduction existance
+                    const expected = calculateExpectedConcreteVolume(f, t, surveyOverrides);
+                    const grossVol = expected.gross;
+                    const shotcreteDec = expected.shotcrete;
                     const netSurvey = Math.max(0, grossVol - shotcreteDec - masonry);
                     
                     newEntries.push({
@@ -353,7 +375,9 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                     <div className="space-y-1">
                         <div className="flex justify-between items-baseline">
                            <label className="text-xs font-semibold text-blue-800">Prior Invert</label>
-                           <span className="text-[9px] text-blue-400">Def: {DEFAULT_RATES.AVG_ACTUAL_INVERT}</span>
+                           <span className="text-[9px] text-blue-400">
+                               {entries.length > 0 ? "Interpolated from Log" : `Def: ${DEFAULT_RATES.AVG_ACTUAL_INVERT}`}
+                           </span>
                         </div>
                         <input 
                             type="number" step="0.01" required
@@ -367,7 +391,9 @@ const DataEntry: React.FC<DataEntryProps> = ({ onSave, entries, onImport, entryT
                     <div className="space-y-1">
                         <div className="flex justify-between items-baseline">
                            <label className="text-xs font-semibold text-blue-800">Prior Kicker</label>
-                           <span className="text-[9px] text-blue-400">Def: {DEFAULT_RATES.AVG_ACTUAL_KICKER}</span>
+                           <span className="text-[9px] text-blue-400">
+                                {entries.length > 0 ? "Interpolated from Log" : `Def: ${DEFAULT_RATES.AVG_ACTUAL_KICKER}`}
+                           </span>
                         </div>
                         <input 
                             type="number" step="0.01" required

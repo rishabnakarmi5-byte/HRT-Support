@@ -1,13 +1,14 @@
 import React, { useState } from 'react';
 import { DEFAULT_RATES, ROCK_CLASS_DESIGN_DATA, INITIAL_CHAINAGE_MAP, EXCAVATION_DATA } from '../constants';
-import { BatchEntry, ConcreteStep } from '../types';
-import { formatChainage } from '../utils';
+import { BatchEntry, ConcreteStep, SurveyPoint } from '../types';
+import { formatChainage, getExcavationProfile } from '../utils';
 
 interface CalculationsProps {
     entries?: BatchEntry[];
+    surveyOverrides?: SurveyPoint[];
 }
 
-const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
+const Calculations: React.FC<CalculationsProps> = ({ entries = [], surveyOverrides = [] }) => {
   const [selectedEntryId, setSelectedEntryId] = useState<string>('');
 
   // Find the selected entry object
@@ -60,56 +61,48 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
 
       logs.push(`Calculating Expected (Net Survey) for: ${formatChainage(start)} to ${formatChainage(end)}`);
 
-      // Interpolation Helper
-      const getArea = (ch: number) => {
-        const exact = EXCAVATION_DATA.find(p => Math.abs(p.chainage - ch) < 0.001);
-        if (exact) return exact.area;
-        // Find neighbors
-        let p1 = EXCAVATION_DATA[0];
-        let p2 = EXCAVATION_DATA[EXCAVATION_DATA.length - 1];
-        if (ch <= p1.chainage) return p1.area;
-        if (ch >= p2.chainage) return p2.area;
+      // 1. Gross Volume with Override checks
+      const relevantPoints = new Set<number>();
+      relevantPoints.add(start);
+      relevantPoints.add(end);
+      EXCAVATION_DATA.forEach(p => { if (p.chainage > start && p.chainage < end) relevantPoints.add(p.chainage); });
+      surveyOverrides.forEach(p => { if (p.chainage > start && p.chainage < end) relevantPoints.add(p.chainage); });
+      const sortedCh = Array.from(relevantPoints).sort((a,b) => a - b);
 
-        for (let i = 0; i < EXCAVATION_DATA.length - 1; i++) {
-            if (EXCAVATION_DATA[i].chainage <= ch && EXCAVATION_DATA[i+1].chainage >= ch) {
-                p1 = EXCAVATION_DATA[i];
-                p2 = EXCAVATION_DATA[i+1];
-                break;
-            }
-        }
-        const ratio = (ch - p1.chainage) / (p2.chainage - p1.chainage);
-        const interpolated = p1.area + (p2.area - p1.area) * ratio;
-        logs.push(`  - Interpolating Area at ${formatChainage(ch)} between ${formatChainage(p1.chainage)} (${p1.area}) and ${formatChainage(p2.chainage)} (${p2.area}) -> ${interpolated.toFixed(3)} m²`);
-        return interpolated;
-      }
-
-      // 1. Gross Volume
-      const points = EXCAVATION_DATA.filter(p => p.chainage > start && p.chainage < end);
-      const allPoints = [
-          { chainage: start, area: getArea(start) },
-          ...points.map(p => ({ chainage: p.chainage, area: p.area })),
-          { chainage: end, area: getArea(end) }
-      ];
-
-      logs.push(`> Found ${allPoints.length} profile points (including interpolated start/end).`);
+      logs.push(`> Analyzing ${sortedCh.length} profile points (Original + Re-Surveys)...`);
 
       let totalGross = 0;
-      for(let i=0; i<allPoints.length-1; i++) {
-          const p1 = allPoints[i];
-          const p2 = allPoints[i+1];
-          const segLen = p2.chainage - p1.chainage;
-          const fill1 = Math.max(0, p1.area - DEFAULT_RATES.FINISHED_INNER_AREA);
-          const fill2 = Math.max(0, p2.area - DEFAULT_RATES.FINISHED_INNER_AREA);
-          const segVol = ((fill1 + fill2)/2) * segLen;
-          totalGross += segVol;
-          logs.push(`  - Segment ${formatChainage(p1.chainage)}-${formatChainage(p2.chainage)} (${segLen.toFixed(2)}m): Avg Fill Area ${((fill1+fill2)/2).toFixed(2)} m² = ${segVol.toFixed(2)} m³`);
+      let totalShotcrete = 0;
+
+      for (let i = 0; i < sortedCh.length - 1; i++) {
+        const c1 = sortedCh[i];
+        const c2 = sortedCh[i+1];
+        const dist = c2 - c1;
+        
+        const p1 = getExcavationProfile(c1, surveyOverrides);
+        const p2 = getExcavationProfile(c2, surveyOverrides);
+        
+        const fill1 = Math.max(0, p1.area - DEFAULT_RATES.FINISHED_INNER_AREA);
+        const fill2 = Math.max(0, p2.area - DEFAULT_RATES.FINISHED_INNER_AREA);
+        const segVol = ((fill1 + fill2) / 2) * dist;
+        totalGross += segVol;
+
+        const isResurvey = p1.isResurvey && p2.isResurvey;
+        let segShotcrete = 0;
+        if (!isResurvey) {
+            segShotcrete = dist * DEFAULT_RATES.SHOTCRETE_DEDUCTION;
+            totalShotcrete += segShotcrete;
+        }
+
+        logs.push(`  - Seg ${formatChainage(c1)}-${formatChainage(c2)} (${dist.toFixed(1)}m): ${isResurvey ? '[RE-SURVEY]' : '[ORIGINAL]'}`);
+        logs.push(`    Fill Area: ${fill1.toFixed(2)} -> ${fill2.toFixed(2)} | Vol: ${segVol.toFixed(2)}`);
+        if (isResurvey) logs.push(`    Shotcrete Deduction DISABLED (New Survey)`);
       }
-      
+
       logs.push(`= Gross Concrete Volume: ${totalGross.toFixed(3)} m³`);
 
       // 2. Deductions
-      const shotcrete = DEFAULT_RATES.SHOTCRETE_DEDUCTION * length;
-      logs.push(`> Deduction: Shotcrete (${length.toFixed(2)}m × ${DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m) = -${shotcrete.toFixed(3)} m³`);
+      logs.push(`> Deduction: Shotcrete (Calculated per segment) = -${totalShotcrete.toFixed(3)} m³`);
       
       let masonry = 0;
       if (entry.stoneMasonryQty !== undefined) {
@@ -117,12 +110,12 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
          logs.push(`> Deduction: Stone Masonry (Specific Logged Value) = -${masonry.toFixed(3)} m³`);
       } else if (entry.hasMasonryDeduction) {
          masonry = DEFAULT_RATES.STONE_MASONRY_AREA * length;
-         logs.push(`> Deduction: Stone Masonry (Legacy Rate) (${length.toFixed(2)}m × ${DEFAULT_RATES.STONE_MASONRY_AREA} m²) = -${masonry.toFixed(3)} m³`);
+         logs.push(`> Deduction: Stone Masonry (Legacy Rate) = -${masonry.toFixed(3)} m³`);
       } else {
          logs.push(`> Deduction: Stone Masonry = 0`);
       }
 
-      const net = Math.max(0, totalGross - shotcrete - masonry);
+      const net = Math.max(0, totalGross - totalShotcrete - masonry);
       logs.push(`= Expected (Net Survey) Volume: ${net.toFixed(3)} m³`);
 
       return logs;
@@ -142,10 +135,6 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
             <span className="bg-blue-100 text-blue-800 font-bold px-3 py-1 rounded-full text-sm">1</span>
             <h3 className="text-xl font-bold text-gray-800">Designed (as per drawing)</h3>
         </div>
-        <p className="text-gray-600 mb-4 leading-relaxed">
-            The design volume is determined by the geological rock class mapped to specific chainages. 
-            Each rock class (III, IV, VA, VB) has a specific cross-sectional area for Invert, Kicker, and Gantry.
-        </p>
         <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 font-mono text-sm space-y-2">
             <p><strong>Step 1:</strong> Identify Rock Class for the given chainage range.</p>
             <p><strong>Step 2:</strong> Look up Unit Area (m²/m) in <code className="bg-white px-1 rounded border">ROCK_CLASS_DESIGN_DATA</code>.</p>
@@ -160,34 +149,25 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
             <h3 className="text-xl font-bold text-gray-800">Expected (as per excavation done / surveyed cross-section)</h3>
         </div>
         <p className="text-gray-600 mb-4 leading-relaxed">
-            This represents the calculated "Void" volume that needs to be filled based on the actual excavation profile, 
-            minus specific deductions. It acts as the engineering baseline for zero-wastage.
+            Calculated by integrating the excavation profile and subtracting deductions. The system now prioritizes <strong>Re-Survey Data</strong> if available.
         </p>
 
         <div className="space-y-6">
             <div>
-                <h4 className="font-bold text-gray-700 mb-2">A. Gross Concrete Volume (Trapezoidal Rule)</h4>
+                <h4 className="font-bold text-gray-700 mb-2">A. Gross Concrete Volume & Shotcrete</h4>
                 <p className="text-sm text-gray-600 mb-2">
-                    First, we calculate the gross volume available between the excavated rock and the finished inner profile.
+                    The system iterates through the chainage length in small segments. For each segment:
                 </p>
-                <div className="bg-gray-50 p-3 rounded border text-sm font-mono text-gray-700">
-                    Fill Area = Excavated Area (from Survey) - Finished Inner Area ({DEFAULT_RATES.FINISHED_INNER_AREA} m²)
-                    <br/><br/>
-                    Gross Vol = Integral(Fill Area) over Length
+                <div className="bg-gray-50 p-3 rounded border text-sm font-mono text-gray-700 space-y-2">
+                    <p>1. Check if Re-Survey data exists. If yes, use New Area. If no, use Original Area.</p>
+                    <p>2. Fill Area = Excavated Area - Finished Inner Area ({DEFAULT_RATES.FINISHED_INNER_AREA} m²)</p>
+                    <p>3. If data is Original: <span className="text-red-500">Apply Shotcrete Deduction ({DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m)</span>.</p>
+                    <p>4. If data is Re-Survey: <span className="text-green-600 font-bold">Shotcrete Deduction = 0</span>.</p>
                 </div>
             </div>
-
-            <div>
-                <h4 className="font-bold text-gray-700 mb-2">B. Deductions</h4>
-                <p className="text-sm text-gray-600 mb-2">We subtract volumes taken up by other materials.</p>
-                <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
-                    <li><strong>Shotcrete:</strong> <code className="bg-gray-100 px-1">{DEFAULT_RATES.SHOTCRETE_DEDUCTION} m³/m</code> is deducted from the gross volume.</li>
-                    <li><strong>Stone Masonry:</strong> Specific volume provided per batch. (Legacy records deduct {DEFAULT_RATES.STONE_MASONRY_AREA} m²/m).</li>
-                </ul>
-            </div>
-
+            
             <div className="p-3 bg-green-50 border border-green-200 rounded text-green-900 font-bold text-center">
-                Expected = Gross Vol - Shotcrete Vol - Masonry Vol
+                Expected = Gross Vol - (Condition Based Shotcrete) - Masonry Vol
             </div>
         </div>
       </section>
@@ -199,14 +179,10 @@ const Calculations: React.FC<CalculationsProps> = ({ entries = [] }) => {
             <h3 className="text-xl font-bold text-gray-800">Poured</h3>
         </div>
         <p className="text-gray-600 mb-4 leading-relaxed">
-            For accurate comparison, we compare the <strong>Total Profile</strong> (Invert + Kicker + Gantry). 
-            When logging a Gantry batch, we must account for the concrete previously poured in the Invert and Kicker steps.
+            When calculating Total Poured (Gantry), we look at previous Invert/Kicker batches.
         </p>
-        
-        <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 text-sm font-mono space-y-2 text-gray-700">
-             <p className="font-bold border-b pb-1 mb-2">If Step == Gantry:</p>
-             <p>Poured = (Gantry Actual Log) + (Prior Invert) + (Prior Kicker)</p>
-             <p className="text-gray-500 text-xs mt-1">* Prior values are either manually entered or approximated using default rates.</p>
+        <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200 text-sm mb-4">
+            <strong>Update:</strong> The system now dynamically calculates "Prior Concrete" by searching for all Invert/Kicker batches that overlap with the specific Gantry chainages, handling partial overlaps and mismatched start/end points mathematically.
         </div>
       </section>
 

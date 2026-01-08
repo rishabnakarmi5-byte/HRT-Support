@@ -32,6 +32,14 @@ export interface ExcavationRecord {
   rockClass: RockClass;
 }
 
+// New Interface for Re-surveyed data
+export interface SurveyPoint {
+  id: string;
+  chainage: number;
+  area: number; // Excavated + Shotcrete Area
+  dateAdded: string;
+}
+
 export interface BatchEntry {
   id: string;
   date: string;

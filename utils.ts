@@ -1,5 +1,5 @@
 
-import { ChainageMapEntry, ConcreteStep, RockClass, BatchEntry } from './types';
+import { ChainageMapEntry, ConcreteStep, RockClass, BatchEntry, SurveyPoint } from './types';
 import { ROCK_CLASS_DESIGN_DATA, INITIAL_CHAINAGE_MAP, EXCAVATION_DATA, DEFAULT_RATES } from './constants';
 
 export const calculateDesignQty = (from: number, to: number, step: ConcreteStep): number => {
@@ -30,73 +30,164 @@ export const calculateDesignQty = (from: number, to: number, step: ConcreteStep)
   return parseFloat(totalQty.toFixed(3));
 };
 
-export const calculateGrossConcreteVolume = (from: number, to: number): number => {
-  const start = Math.min(from, to);
-  const end = Math.max(from, to);
-  
-  if (start === end) return 0;
+// Helper: Interpolate Area from a dataset (Points must be sorted)
+const interpolateFromSet = (targetCh: number, dataset: {chainage: number, area: number}[]): number | null => {
+    if (dataset.length === 0) return null;
+    
+    // Bounds check - if dataset covers this chainage
+    const minCh = dataset[0].chainage;
+    const maxCh = dataset[dataset.length-1].chainage;
 
-  // 1. Get subset of points within range
-  const points = EXCAVATION_DATA.filter(p => p.chainage >= start && p.chainage <= end)
-                                .map(p => ({ chainage: p.chainage, area: p.area }));
+    // Use a small tolerance or strict checking. 
+    // If strict: if (targetCh < minCh || targetCh > maxCh) return null;
+    // However, for gaps between separate survey blocks, strict is better.
+    if (targetCh < minCh || targetCh > maxCh) return null;
 
-  // Helper to interpolate Excavated Area at a specific chainage
-  const interpolateArea = (targetCh: number): number => {
     // Exact match
-    const exact = EXCAVATION_DATA.find(p => Math.abs(p.chainage - targetCh) < 0.001);
+    const exact = dataset.find(p => Math.abs(p.chainage - targetCh) < 0.001);
     if (exact) return exact.area;
 
-    // Boundary checks - Clamp to nearest if out of bounds
-    if (EXCAVATION_DATA.length === 0) return 0;
-    if (targetCh <= EXCAVATION_DATA[0].chainage) return EXCAVATION_DATA[0].area;
-    if (targetCh >= EXCAVATION_DATA[EXCAVATION_DATA.length - 1].chainage) return EXCAVATION_DATA[EXCAVATION_DATA.length - 1].area;
-
     // Find surrounding points
-    let p1 = EXCAVATION_DATA[0];
-    let p2 = EXCAVATION_DATA[EXCAVATION_DATA.length - 1];
+    for (let i = 0; i < dataset.length - 1; i++) {
+        if (dataset[i].chainage <= targetCh && dataset[i+1].chainage >= targetCh) {
+            const p1 = dataset[i];
+            const p2 = dataset[i+1];
+            // Linear Interpolation
+            const ratio = (targetCh - p1.chainage) / (p2.chainage - p1.chainage);
+            return p1.area + (p2.area - p1.area) * ratio;
+        }
+    }
+    return null;
+}
 
-    for (let i = 0; i < EXCAVATION_DATA.length - 1; i++) {
-      if (EXCAVATION_DATA[i].chainage <= targetCh && EXCAVATION_DATA[i+1].chainage >= targetCh) {
-        p1 = EXCAVATION_DATA[i];
-        p2 = EXCAVATION_DATA[i+1];
-        break;
-      }
+// Helper: Get Profile Area and Type (Original vs New Survey)
+export const getExcavationProfile = (ch: number, surveyPoints: SurveyPoint[]): { area: number, isResurvey: boolean } => {
+    // 1. Try New Survey Data First (Sorted check implies we should sort surveyPoints before passing, but we'll sort here to be safe if small)
+    // Optimization: Assume surveyPoints passed are sorted.
+    
+    if (surveyPoints.length > 1) {
+        // Find if 'ch' falls within the range of any contiguous survey block? 
+        // Simple approach: See if we can interpolate.
+        const surveyArea = interpolateFromSet(ch, surveyPoints);
+        if (surveyArea !== null) {
+            return { area: surveyArea, isResurvey: true };
+        }
     }
 
-    if (p1.chainage === p2.chainage) return p1.area;
+    // 2. Fallback to Original Excavation Data
+    // We treat EXCAVATION_DATA as continuous for the whole tunnel essentially
+    const origArea = interpolateFromSet(ch, EXCAVATION_DATA);
+    
+    // Fallback for out of bounds (shouldn't happen with full data)
+    if (origArea !== null) return { area: origArea, isResurvey: false };
+    
+    // Extreme fallback (clamp to nearest)
+    if (ch < EXCAVATION_DATA[0].chainage) return { area: EXCAVATION_DATA[0].area, isResurvey: false };
+    return { area: EXCAVATION_DATA[EXCAVATION_DATA.length-1].area, isResurvey: false };
+};
 
-    // Linear Interpolation
-    const ratio = (targetCh - p1.chainage) / (p2.chainage - p1.chainage);
-    return p1.area + (p2.area - p1.area) * ratio;
-  };
 
-  // 2. Add Start and End points if not present
-  if (!points.find(p => Math.abs(p.chainage - start) < 0.001)) {
-    points.unshift({ chainage: start, area: interpolateArea(start) });
+export const calculateExpectedConcreteVolume = (from: number, to: number, surveyPoints: SurveyPoint[] = []) => {
+  const start = Math.min(from, to);
+  const end = Math.max(from, to);
+  if (start === end) return { gross: 0, shotcrete: 0 };
+
+  // Generate Integration Points
+  // We include start, end, and all points from EXCAVATION_DATA and surveyPoints that fall within range
+  // to ensure trapezoidal accuracy.
+  
+  const relevantPoints = new Set<number>();
+  relevantPoints.add(start);
+  relevantPoints.add(end);
+
+  EXCAVATION_DATA.forEach(p => {
+      if (p.chainage > start && p.chainage < end) relevantPoints.add(p.chainage);
+  });
+  surveyPoints.forEach(p => {
+      if (p.chainage > start && p.chainage < end) relevantPoints.add(p.chainage);
+  });
+
+  const sortedCh = Array.from(relevantPoints).sort((a,b) => a - b);
+
+  let totalGross = 0;
+  let totalShotcreteDeduction = 0;
+
+  for (let i = 0; i < sortedCh.length - 1; i++) {
+      const c1 = sortedCh[i];
+      const c2 = sortedCh[i+1];
+      const dist = c2 - c1;
+
+      const p1 = getExcavationProfile(c1, surveyPoints);
+      const p2 = getExcavationProfile(c2, surveyPoints);
+
+      // Trapezoidal Rule for Concrete Fill Area
+      const fill1 = Math.max(0, p1.area - DEFAULT_RATES.FINISHED_INNER_AREA);
+      const fill2 = Math.max(0, p2.area - DEFAULT_RATES.FINISHED_INNER_AREA);
+      
+      const sliceVol = ((fill1 + fill2) / 2) * dist;
+      totalGross += sliceVol;
+
+      // Shotcrete Deduction
+      // If BOTH points are re-survey, we assume the segment is re-surveyed -> No Deduction.
+      // If mixed or both original -> Apply deduction.
+      // (Strictly: if we have survey data, it includes shotcrete, so no deduction needed).
+      
+      const isSegmentResurveyed = p1.isResurvey && p2.isResurvey;
+      
+      if (!isSegmentResurveyed) {
+          totalShotcreteDeduction += (dist * DEFAULT_RATES.SHOTCRETE_DEDUCTION);
+      }
   }
-  if (!points.find(p => Math.abs(p.chainage - end) < 0.001)) {
-    points.push({ chainage: end, area: interpolateArea(end) });
-  }
 
-  // 3. Sort points by chainage
-  points.sort((a, b) => a.chainage - b.chainage);
+  return { gross: totalGross, shotcrete: totalShotcreteDeduction };
+};
 
-  // 4. Calculate Volume using Trapezoidal Rule on "Concrete Fill Area"
-  // Concrete Fill Area = Excavated Area - Finished Inner Area
-  let totalVolume = 0;
+// Old function wrapper for backward compatibility if needed, but we should switch to above
+export const calculateGrossConcreteVolume = (from: number, to: number): number => {
+    return calculateExpectedConcreteVolume(from, to, []).gross;
+}
 
-  for (let i = 0; i < points.length - 1; i++) {
-    const p1 = points[i];
-    const p2 = points[i+1];
-    const segLen = p2.chainage - p1.chainage;
+// ---------------------------------------------------------
+// NEW: Prior Concrete Interpolation for Mismatched Chainages
+// ---------------------------------------------------------
+export const calculatePriorConcreteVolume = (
+    targetFrom: number, 
+    targetTo: number, 
+    stepToFind: ConcreteStep, 
+    allEntries: BatchEntry[]
+): number => {
+    const targetStart = Math.min(targetFrom, targetTo);
+    const targetEnd = Math.max(targetFrom, targetTo);
+    const targetLen = targetEnd - targetStart;
 
-    const fillArea1 = Math.max(0, p1.area - DEFAULT_RATES.FINISHED_INNER_AREA);
-    const fillArea2 = Math.max(0, p2.area - DEFAULT_RATES.FINISHED_INNER_AREA);
+    if (targetLen <= 0) return 0;
 
-    totalVolume += ((fillArea1 + fillArea2) / 2) * segLen;
-  }
+    // Filter relevant batches
+    const relevantBatches = allEntries.filter(e => e.step === stepToFind);
 
-  return totalVolume;
+    let totalVolumeFound = 0;
+
+    relevantBatches.forEach(batch => {
+        const batchStart = Math.min(batch.fromChainage, batch.toChainage);
+        const batchEnd = Math.max(batch.fromChainage, batch.toChainage);
+        const batchLen = batchEnd - batchStart;
+
+        // Check Overlap
+        const overlapStart = Math.max(targetStart, batchStart);
+        const overlapEnd = Math.min(targetEnd, batchEnd);
+
+        if (overlapStart < overlapEnd) {
+            const overlapLen = overlapEnd - overlapStart;
+            
+            // Linear density of the batch
+            const linearDensity = batch.actualQty / batchLen;
+            
+            // Volume contribution
+            totalVolumeFound += linearDensity * overlapLen;
+        }
+    });
+
+    return totalVolumeFound;
 };
 
 // Merge ranges to handle overlapping entries
@@ -125,29 +216,6 @@ export const calculateUnionLength = (entries: BatchEntry[]): number => {
   }));
   const merged = mergeRanges(intervals);
   return merged.reduce((acc, curr) => acc + (curr.end - curr.start), 0);
-};
-
-// Calculate the Theoretical Design Volume that has been covered by the logged entries
-// This handles overlaps correctly by merging ranges first.
-export const calculateCoveredDesignVolume = (entries: BatchEntry[], step: ConcreteStep): number => {
-  // 1. Get ranges for this step
-  const stepEntries = entries.filter(e => e.step === step);
-  const ranges = stepEntries.map(e => ({
-    start: Math.min(e.fromChainage, e.toChainage), 
-    end: Math.max(e.fromChainage, e.toChainage)
-  }));
-  
-  // 2. Merge overlapping ranges
-  const mergedRanges = mergeRanges(ranges);
-  
-  // 3. Calculate design volume for these unique ranges against the Rock Map
-  let coveredVolume = 0;
-  
-  mergedRanges.forEach(range => {
-    coveredVolume += calculateDesignQty(range.start, range.end, step);
-  });
-  
-  return coveredVolume;
 };
 
 export const formatChainage = (value: number): string => {

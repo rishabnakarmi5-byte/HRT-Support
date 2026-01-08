@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { BatchEntry, ConcreteStep, ForecastSummary } from './types';
+import { BatchEntry, ConcreteStep, ForecastSummary, SurveyPoint } from './types';
 import { TOTAL_TUNNEL_LENGTH, INITIAL_CHAINAGE_MAP, ROCK_CLASS_DESIGN_DATA } from './constants';
 import { calculateDesignQty, calculateUnionLength, mergeRanges } from './utils';
 import Dashboard from './components/Dashboard';
@@ -16,6 +16,8 @@ const App: React.FC = () => {
   const [user, setUser] = useState<firebase.User | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [entries, setEntries] = useState<BatchEntry[]>([]);
+  const [surveyOverrides, setSurveyOverrides] = useState<SurveyPoint[]>([]);
+  
   const [activeTab, setActiveTab] = useState<'dashboard' | 'entry' | 'analysis' | 'params' | 'calcs'>('dashboard');
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
 
@@ -36,25 +38,35 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!user || !db) return;
 
-    // Subscribe to the 'batches' collection
-    const unsubscribe = db.collection("batches").orderBy("date", "desc").onSnapshot((snapshot) => {
+    // A. Fetch Batches
+    const unsubBatches = db.collection("batches").orderBy("date", "desc").onSnapshot((snapshot) => {
       const dbEntries = snapshot.docs.map(doc => ({ 
           ...doc.data(), 
           id: doc.id 
       })) as BatchEntry[];
-      
-      // Sort in JS as well to be safe or rely on query order
-      // We want to process them for display if needed, but data is raw here
       setEntries(dbEntries);
     }, (error) => {
-      console.error("Error fetching real-time data:", error);
-      alert("Error connecting to database. Do you have permission?");
+      console.error("Error fetching batch data:", error);
     });
 
-    return () => unsubscribe();
+    // B. Fetch Survey Overrides
+    const unsubSurveys = db.collection("surveys").orderBy("chainage", "asc").onSnapshot((snapshot) => {
+        const dbSurveys = snapshot.docs.map(doc => ({
+            ...doc.data(),
+            id: doc.id
+        })) as SurveyPoint[];
+        setSurveyOverrides(dbSurveys);
+    }, (error) => {
+        console.error("Error fetching survey data:", error);
+    });
+
+    return () => {
+        unsubBatches();
+        unsubSurveys();
+    };
   }, [user]);
 
-  // Handle Saving (Write to Firestore)
+  // Handle Saving Batches
   const handleSave = async (newEntriesData: Omit<BatchEntry, 'id' | 'designedQty'>[], isEdit: boolean = false) => {
     if (!db || !user) return;
 
@@ -106,6 +118,30 @@ const App: React.FC = () => {
             alert("Failed to delete.");
         }
     }
+  };
+
+  // Handle Survey Overrides
+  const handleSaveSurvey = async (points: Omit<SurveyPoint, 'id'>[]) => {
+      if (!db || !user) return;
+      try {
+          const batch = db.batch();
+          points.forEach(p => {
+              const ref = db.collection("surveys").doc();
+              batch.set(ref, { ...p, id: ref.id });
+          });
+          await batch.commit();
+          alert(`Added ${points.length} survey points.`);
+      } catch (e) {
+          console.error(e);
+          alert("Failed to save survey data.");
+      }
+  };
+
+  const handleDeleteSurvey = async (id: string) => {
+      if (!db) return;
+      if (confirm("Delete this survey point?")) {
+          await db.collection("surveys").doc(id).delete();
+      }
   };
 
   const handleLogin = async () => {
@@ -312,13 +348,14 @@ const App: React.FC = () => {
             <DataEntry 
                 onSave={handleSave} 
                 entries={entries}
+                surveyOverrides={surveyOverrides}
                 onImport={handleImport}
                 entryToEdit={entryToEdit} 
             />
         )}
         {activeTab === 'analysis' && <Analysis entries={entries} totalLength={TOTAL_TUNNEL_LENGTH} forecast={forecast} />}
-        {activeTab === 'params' && <Parameters />}
-        {activeTab === 'calcs' && <Calculations entries={entries} />}
+        {activeTab === 'params' && <Parameters surveyOverrides={surveyOverrides} onAddSurvey={handleSaveSurvey} onDeleteSurvey={handleDeleteSurvey} />}
+        {activeTab === 'calcs' && <Calculations entries={entries} surveyOverrides={surveyOverrides} />}
       </main>
 
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t p-3 flex justify-around shadow-inner z-50">
